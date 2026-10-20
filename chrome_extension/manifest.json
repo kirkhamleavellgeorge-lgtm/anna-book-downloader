@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Anna 图书助手 · Chrome 连接器",
+  "description": "连接本机图书助手，使用当前 Chrome 的网站会话下载书单。",
+  "version": "1.0.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["scripting", "downloads", "storage", "alarms"],
+  "host_permissions": [
+    "https://annas-archive.pk/*",
+    "https://annas-archive.gl/*",
+    "https://annas-archive.gd/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {"service_worker": "background.js"},
+  "action": {
+    "default_title": "Anna 图书助手：连接状态",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:*"
+  }
+}

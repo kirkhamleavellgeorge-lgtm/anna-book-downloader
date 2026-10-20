@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anna 图书助手 · Chrome 连接器</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">CHROME 连接器</p>
+    <h1>Anna 图书助手</h1>
+    <p class="intro">在当前 Chrome 中继续使用网站登录与验证会话。</p>
+    <section class="connection" aria-live="polite">
+      <span id="indicator" class="indicator"></span>
+      <div><strong id="state">正在读取连接状态…</strong><p id="detail"></p></div>
+    </section>
+    <button id="reconnect" type="button">重新连接</button>
+    <p id="welcome" hidden>扩展已加载。请打开本机「Anna 图书下载助手」，再点「重新连接」。以后输入书单即可开始。</p>
+    <ol>
+      <li>保持本机图书助手运行。</li>
+      <li>在助手中选择「当前 Chrome」并输入书单。</li>
+      <li>如果网站要求手动验证码，在新打开的页面中完成即可。</li>
+    </ol>
+    <p class="note">仅操作助手创建的页面和下载。关闭助手不会退出 Chrome；本扩展无需读取密码或 Cookies。</p>
+    <p class="note">连接建立后可关闭此页面。</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

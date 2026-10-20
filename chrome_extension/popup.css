@@ -1,0 +1,18 @@
+:root { color-scheme: light; font-family: "Microsoft YaHei UI", system-ui, sans-serif; color: #243247; background: #f4f6fa; }
+body { margin: 0; min-width: 360px; }
+main { max-width: 520px; padding: 25px; margin: 0 auto; }
+.eyebrow { color: #65728a; letter-spacing: .12em; font-size: 11px; font-weight: 700; margin: 0 0 8px; }
+h1 { font-size: 23px; margin: 0 0 8px; }
+p { font-size: 13px; line-height: 1.75; }
+.intro { color: #65728a; margin-top: 0; }
+.connection { display: flex; gap: 11px; background: white; border: 1px solid #dde4ef; border-radius: 9px; padding: 15px; margin: 20px 0 15px; }
+.indicator { width: 9px; height: 9px; border-radius: 50%; background: #94a0b2; flex: 0 0 auto; margin-top: 5px; }
+.indicator.connected { background: #26824d; }
+strong { font-size: 14px; }
+#detail { margin: 6px 0 0; color: #65728a; overflow-wrap: anywhere; }
+button { border: 0; border-radius: 6px; width: 100%; padding: 11px 16px; color: white; background: #285dd0; font: inherit; font-size: 14px; cursor: pointer; }
+button:hover { background: #1948ad; }
+button:disabled { background: #9aaacb; cursor: wait; }
+ol { padding-left: 21px; margin: 20px 0; font-size: 13px; line-height: 1.9; }
+.note { color: #65728a; font-size: 12px; }
+#welcome { padding: 11px 13px; background: #e7efff; border-radius: 6px; }
