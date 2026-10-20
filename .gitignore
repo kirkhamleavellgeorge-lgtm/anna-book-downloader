@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+downloads/
+.artifacts/
+chrome_extension/local-config.json
+chrome_extension/local-config.tmp
+.vscode/
+.env
+.env.*
+*.log
