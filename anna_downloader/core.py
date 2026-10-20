@@ -63,6 +63,75 @@ class Candidate:
     has_issues: bool = False
 
 
+@dataclass(frozen=True)
+class CandidateGroup:
+    key: str
+    title: str
+    candidates: tuple[Candidate, ...]
+
+
+_VOLUME_MARKER = re.compile(
+    r"第\s*(?P<number>[0-9零〇一二三四五六七八九十百千万两]+)\s*(?P<unit>[集卷册部])"
+    r"|(?P<position>[上中下])\s*(?P<position_unit>[集卷册部])"
+    r"|(?<![a-z0-9])(?P<english_unit>vol(?:ume)?\.?|part)\s*[:.#]?\s*(?P<english_number>\d+|[ivxlcdm]+)(?![a-z0-9])",
+    re.I,
+)
+
+
+def _volume_identity(marker: re.Match) -> str:
+    unit = marker["unit"] or marker["position_unit"]
+    number = marker["number"] or marker["position"]
+    if marker["english_unit"]:
+        unit = "部" if marker["english_unit"].casefold() == "part" else "卷"
+        number = marker["english_number"].casefold()
+    # Normalize leading zeroes, while retaining the catalogue's Chinese and
+    # Roman numbering rather than guessing whether two labels are equivalent.
+    if number.isdecimal():
+        number = str(int(number))
+    return unit + ":" + number
+
+
+def _metadata_volumes(book: Candidate) -> list[tuple[str, str]]:
+    metadata = unicodedata.normalize("NFKC", book.metadata)
+    # Search metadata separately from the title and author: their names may
+    # themselves contain words such as "Part 1" or "上册".
+    for value in (book.title, book.author):
+        value = unicodedata.normalize("NFKC", value).strip()
+        if value:
+            metadata = re.sub(re.escape(value), " ", metadata, count=1, flags=re.I)
+    title_markers = {
+        _volume_identity(marker)
+        for marker in _VOLUME_MARKER.finditer(unicodedata.normalize("NFKC", book.title))
+    }
+    volumes: dict[str, str] = {}
+    # A whole delimited field is evidence of a volume. A number in a year,
+    # author name, publisher or descriptive sentence is not enough.
+    for field in re.split(r"[\r\n|·•,，;；()\[\]{}《》【】]+", metadata):
+        marker = _VOLUME_MARKER.fullmatch(field.strip())
+        if marker:
+            identity = _volume_identity(marker)
+            if identity not in title_markers:
+                volumes.setdefault(identity, marker[0])
+    return list(volumes.items())
+
+
+def group_candidates(ranked: list[Candidate]) -> list[CandidateGroup]:
+    """Keep one selectable group per full title/explicit volume, in rank order."""
+    grouped: dict[str, tuple[str, list[Candidate]]] = {}
+    for book in ranked:
+        volumes = _metadata_volumes(book)
+        key = normalize(book.title)
+        if volumes:
+            key += "|" + "|".join(sorted(identity for identity, _ in volumes))
+        if key not in grouped:
+            title = book.title
+            if volumes:
+                title += "（" + "、".join(label for _, label in volumes) + "）"
+            grouped[key] = (title, [])
+        grouped[key][1].append(book)
+    return [CandidateGroup(key, title, tuple(books)) for key, (title, books) in grouped.items()]
+
+
 def web_url(url: str, base: str) -> str | None:
     result = urljoin(base, url)
     parsed = urlsplit(result)
@@ -111,6 +180,22 @@ def title_similarity(query: str, title: str) -> float:
         return 0
     if wanted == actual:
         return 1
+    requested_volumes = {
+        _volume_identity(marker)
+        for marker in _VOLUME_MARKER.finditer(unicodedata.normalize("NFKC", query))
+    }
+    actual_volumes = {
+        _volume_identity(marker)
+        for marker in _VOLUME_MARKER.finditer(unicodedata.normalize("NFKC", title))
+    }
+    if requested_volumes and not requested_volumes <= actual_volumes:
+        return 0
+    # An explicit suffix is meaningful even for a short title, unlike a bare
+    # number or an arbitrary trailing word. This lets a series search reach its
+    # numbered volumes before the user chooses which ones to download.
+    if len(wanted) >= 2 and actual.startswith(wanted):
+        if _VOLUME_MARKER.fullmatch(actual[len(wanted):]):
+            return 0.95
     # A subtitle/edition suffix is acceptable; a short word appearing anywhere is not.
     for base in re.split(r"[:：\(（\[【]", title)[0:1]:
         if normalize(base) == wanted:

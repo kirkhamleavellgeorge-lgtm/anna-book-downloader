@@ -7,16 +7,16 @@ import logging
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 from urllib.parse import urlencode
 from zipfile import BadZipFile
 
 from playwright.async_api import BrowserContext, Download, Error as BrowserError, Page, async_playwright
 
 from .core import (
-    BookRequest, Candidate, History, file_md5, free_download_links, parse_candidates,
+    BookRequest, Candidate, CandidateGroup, History, file_md5, free_download_links, group_candidates, parse_candidates,
     rank_candidates, ready_download_links, safe_filename, validate_download, verification_kind, verification_required,
 )
 from .chrome_session import ChromeBridge, ChromeContext, ChromeDownload, ChromePage
@@ -56,8 +56,10 @@ class Options:
 class Runner:
     """One browser session and a serial queue; human verification stays in the browser."""
 
-    def __init__(self, options: Options, emit: Callable[[str, dict], None], stop: threading.Event):
+    def __init__(self, options: Options, emit: Callable[[str, dict], None], stop: threading.Event,
+                 select_volumes: Callable[[BookRequest, list[CandidateGroup]], Awaitable[list[str]]] | None = None):
         self.options, self.emit, self.stop = options, emit, stop
+        self.select_volumes = select_volumes
         self.context: BrowserContext | ChromeContext | None = None
         self.downloads: asyncio.Queue[tuple[int, Download]] = asyncio.Queue()
         self.generation = 0
@@ -68,6 +70,7 @@ class Runner:
         self.active_extension = "epub"
         self.report: list[dict] = []
         self.totals = {"done": 0, "skipped": 0, "failed": 0, "stopped": False}
+        self.extra_rows = 0
 
     def log(self, message: str) -> None:
         logging.info(message)
@@ -168,12 +171,17 @@ class Runner:
             for page in self.context.pages:
                 self._watch_page(page)
             try:
-                for self.index, request in enumerate(requests):
+                for request_index, request in enumerate(requests):
+                    if self.stop.is_set():
+                        raise asyncio.CancelledError
+                    self.index = request_index
                     self.current_status = "等待中"
                     result = {"query": request.query}
                     self.report.append(result)
                     key = history.key(request, self.options.preferred, self.options.language, self.options.output)
-                    previous = await asyncio.to_thread(history.lookup, key)
+                    # Interactive queues must search again so a previously saved
+                    # volume cannot prevent the user from selecting another one.
+                    previous = await asyncio.to_thread(history.lookup, key) if self.select_volumes is None else None
                     if previous:
                         self.state("已跳过", str(previous), path=str(previous))
                         self.totals["skipped"] += 1
@@ -189,47 +197,53 @@ class Runner:
                         self.log(f"搜索结果：识别到 {len(matches)} 条记录，其中 {len(ranked)} 条符合书名、作者和语言条件。")
                         if not ranked:
                             raise DownloadProblem("没有匹配的可下载版本。可补充作者、使用 ISBN，或将语言设为不限。")
-                        last_error = "没有可用的免费通道"
-                        saved = None
-                        for candidate in ranked[:3]:
-                            self.active_extension = candidate.extension
-                            self.state("已匹配", f"{candidate.title} · {candidate.extension.upper()}", matched=candidate.title, url=candidate.url)
-                            self.log(f"匹配：{candidate.title} / {candidate.extension.upper()} / {candidate.md5}")
-                            expected = self.options.output / safe_filename(candidate.title, candidate.md5, candidate.extension)
-                            if expected.is_file() and await asyncio.to_thread(file_md5, expected) == candidate.md5:
-                                saved = expected
-                            else:
-                                await self._navigate(search, candidate.url)
-                                links = await self._wait_content(search, "detail")
-                                for link in links[:3]:
-                                    self.generation += 1
-                                    if isinstance(self.context, ChromeContext):
-                                        attempt = await self.context.new_page(extension=candidate.extension)
-                                    else:
-                                        attempt = await self.context.new_page()
-                                    self._watch_page(attempt)
-                                    try:
-                                        self.state("等待免费通道", "正在打开免费排队页")
-                                        await self._navigate(attempt, link)
-                                        download = await self._wait_download()
-                                        saved = await self._save(download, candidate)
-                                        break
-                                    except RateLimited:
-                                        raise
-                                    except (DownloadProblem, BrowserError, ValueError, OSError, KeyError, BadZipFile) as exc:
-                                        last_error = str(exc)
-                                        self.log(f"此通道未完成：{last_error}")
-                                    finally:
-                                        await self._close_attempt()
-                            if saved:
-                                history.remember(key, candidate, saved)
-                                self.state("已完成", str(saved), path=str(saved))
-                                self.totals["done"] += 1
-                                result.update(status="done", path=str(saved), md5=candidate.md5)
-                                self.log(f"已保存：{saved.name}")
-                                break
-                        if not saved:
-                            raise DownloadProblem(last_error)
+                        groups = group_candidates(ranked)
+                        if len(groups) > 1 and self.select_volumes is not None:
+                            self.state("等待勾选", f"找到 {len(groups)} 个分集 / 分册，请在弹窗中勾选")
+                            selected = set(await self.select_volumes(request, groups))
+                            if self.stop.is_set():
+                                raise asyncio.CancelledError
+                            groups = [group for group in groups if group.key in selected]
+                        else:
+                            groups = groups[:1]
+                        if not groups:
+                            self.state("已跳过", "未选择分集 / 分册")
+                            self.totals["skipped"] += 1
+                            result.update(status="skipped", reason="no_selection")
+                            continue
+                        for group_index, group in enumerate(groups):
+                            if self.stop.is_set():
+                                raise asyncio.CancelledError
+                            if group_index:
+                                self.index = len(requests) + self.extra_rows
+                                self.extra_rows += 1
+                                self.emit("book_added", {"index": self.index, "query": group.title})
+                                result = {"query": request.query}
+                                self.report.append(result)
+                            result["selected_title"] = group.title
+                            self.state("已选择", group.title, matched=group.title, path="", url="")
+                            volume_key = key + "|volume|" + group.key
+                            previous = await asyncio.to_thread(history.lookup, volume_key)
+                            if previous:
+                                self.state("已跳过", str(previous), path=str(previous))
+                                self.totals["skipped"] += 1
+                                result.update(status="skipped", path=str(previous))
+                                continue
+                            try:
+                                await self._download_group(search, group, history, volume_key, result)
+                                if self.select_volumes is None:
+                                    # Preserve noninteractive single-book history.
+                                    candidate = next(book for book in group.candidates if book.md5 == result["md5"])
+                                    history.remember(key, candidate, Path(result["path"]))
+                            except RateLimited:
+                                raise
+                            except (DownloadProblem, BrowserError, ValueError, OSError, BadZipFile) as exc:
+                                self.state("失败", str(exc), path="")
+                                self.totals["failed"] += 1
+                                result.update(status="failed", error=str(exc))
+                                self.log(f"未完成《{group.title}》：{exc}")
+                            if group_index < len(groups) - 1:
+                                await asyncio.sleep(1)
                     except RateLimited as exc:
                         self.state("受网站限额限制", str(exc))
                         self.totals["failed"] += 1
@@ -251,6 +265,55 @@ class Runner:
             finally:
                 with contextlib.suppress(BrowserError, asyncio.TimeoutError):
                     await asyncio.wait_for(self.context.close(), timeout=10)
+
+    async def _download_group(self, search, group: CandidateGroup, history: History, key: str, result: dict) -> None:
+        """Try alternative files for this volume only; never switch to another volume."""
+        last_error = "没有可用的免费通道"
+        for candidate in group.candidates[:3]:
+            self.active_extension = candidate.extension
+            self.state("已匹配", f"{group.title} · {candidate.extension.upper()}", matched=group.title, url=candidate.url)
+            self.log(f"匹配：{group.title} / {candidate.extension.upper()} / {candidate.md5}")
+            expected = self.options.output / safe_filename(group.title, candidate.md5, candidate.extension)
+            saved = None
+            try:
+                if expected.is_file() and await asyncio.to_thread(file_md5, expected) == candidate.md5:
+                    saved = expected
+                else:
+                    await self._navigate(search, candidate.url)
+                    links = await self._wait_content(search, "detail")
+                    for link in links[:3]:
+                        self.generation += 1
+                        if isinstance(self.context, ChromeContext):
+                            attempt = await self.context.new_page(extension=candidate.extension)
+                        else:
+                            attempt = await self.context.new_page()
+                        self._watch_page(attempt)
+                        try:
+                            self.state("等待免费通道", "正在打开免费排队页")
+                            await self._navigate(attempt, link)
+                            download = await self._wait_download()
+                            saved = await self._save(download, replace(candidate, title=group.title))
+                            break
+                        except RateLimited:
+                            raise
+                        except (DownloadProblem, BrowserError, ValueError, OSError, KeyError, BadZipFile) as exc:
+                            last_error = str(exc)
+                            self.log(f"此通道未完成：{last_error}")
+                        finally:
+                            await self._close_attempt()
+            except RateLimited:
+                raise
+            except (DownloadProblem, BrowserError, ValueError, OSError, BadZipFile) as exc:
+                last_error = str(exc)
+                self.log(f"此版本未完成：{last_error}")
+            if saved:
+                history.remember(key, candidate, saved)
+                self.state("已完成", str(saved), path=str(saved))
+                self.totals["done"] += 1
+                result.update(status="done", path=str(saved), md5=candidate.md5)
+                self.log(f"已保存：{saved.name}")
+                return
+        raise DownloadProblem(last_error)
 
     async def _dispose_page(self, page: Page) -> None:
         self.verifications.pop(page, None)

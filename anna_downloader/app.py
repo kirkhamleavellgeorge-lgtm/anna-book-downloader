@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 from .browser import Options, Runner
 from .chrome_session import ChromeBridge
 from .core import parse_requests
+from .selection import VolumeSelectionDialog
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +34,8 @@ class App:
         self.events = queue.Queue()
         self.chrome_bridge = ChromeBridge(DATA, ROOT / "chrome_extension", lambda kind, data: self.events.put((kind, data)))
         self.chrome_guide = None
+        self.volume_dialog = None
+        self.selection_token = None
         self.closing = False
         self.rows = []
         self.row_data = []
@@ -260,7 +263,7 @@ class App:
 
         def work():
             try:
-                runner = Runner(options, lambda kind, data: self.events.put((kind, data)), self.stop)
+                runner = Runner(options, lambda kind, data: self.events.put((kind, data)), self.stop, select_volumes=self._select_volumes)
                 asyncio.run(runner.run(books))
             except Exception as exc:
                 logging.exception("Worker failed")
@@ -270,6 +273,33 @@ class App:
         self.worker = threading.Thread(target=work, name="anna-downloads", daemon=True)
         self.worker.start()
         self.status.set(f"已加入 {len(books)} 本书；正在使用已连接的 Chrome。")
+
+    async def _select_volumes(self, request, groups):
+        """Wait in the worker; all Tk operations stay on the main thread."""
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        token = object()
+
+        def complete(keys):
+            def resolve():
+                if not future.done():
+                    future.set_result(keys)
+            try:
+                loop.call_soon_threadsafe(resolve)
+            except RuntimeError:
+                pass  # The stopped worker has already closed its event loop.
+
+        self.events.put(("select_volumes", {"query": request.query, "groups": groups, "complete": complete, "token": token}))
+        try:
+            return await future
+        finally:
+            self.events.put(("selection_closed", {"token": token}))
+
+    def _close_volume_dialog(self):
+        dialog, self.volume_dialog = self.volume_dialog, None
+        self.selection_token = None
+        if dialog is not None:
+            dialog.close()
 
     def _busy(self, busy):
         for control in self.controls:
@@ -285,6 +315,7 @@ class App:
 
     def _stop(self):
         self.stop.set()
+        self._close_volume_dialog()
         self.stop_button.configure(state="disabled")
         self.status.set("正在停止任务，并关闭本程序创建的 Chrome 标签页……")
 
@@ -306,6 +337,20 @@ class App:
                     self.chrome_status.set("已连接 Chrome：使用当前配置的网站会话" if data.get("connected") else data["message"])
                     if data.get("connected"):
                         self._log(data["message"])
+                elif kind == "select_volumes":
+                    if self.closing or self.stop.is_set():
+                        data["complete"]([])
+                        continue
+                    self._close_volume_dialog()
+                    self.selection_token = data["token"]
+                    self.volume_dialog = VolumeSelectionDialog(self.root, data["query"], data["groups"], data["complete"], on_stop=self._stop)
+                elif kind == "selection_closed":
+                    if self.selection_token is data["token"]:
+                        self._close_volume_dialog()
+                elif kind == "book_added" and data["index"] == len(self.rows):
+                    row = {"query": data["query"], "matched": "", "status": "等待中", "detail": ""}
+                    self.rows.append(self.table.insert("", "end", values=tuple(row[k] for k in ("query", "matched", "status", "detail"))))
+                    self.row_data.append(row)
                 elif kind == "book" and 0 <= data["index"] < len(self.rows):
                     index = data["index"]
                     self.row_data[index].update(data)
@@ -318,6 +363,7 @@ class App:
                     if not self.closing:
                         messagebox.showerror("运行未完成", data["message"])
                 elif kind == "finished":
+                    self._close_volume_dialog()
                     self._busy(False)
                     for index, row in enumerate(self.row_data):
                         if row["status"] == "等待中":
@@ -370,6 +416,7 @@ class App:
     def _close(self):
         self._save_settings()
         self.closing = True
+        self._close_volume_dialog()
         if self.worker and self.worker.is_alive():
             self._stop()
         else:
